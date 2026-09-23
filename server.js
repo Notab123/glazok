@@ -31,9 +31,10 @@ function broadcast(obj, exceptId) {
 }
 
 // ---------- ICE/TURN-конфигурация ----------
-// Если в окружении заданы CF_ACCOUNT_ID и CF_API_TOKEN (Cloudflare Calls TURN),
-// раздаём рлей с двойным стеком IPv4+IPv6 — единственный рабочий путь для
-// мобильных операторов с IPv6-only. Иначе — публичный openrelay (только IPv4).
+// Если заданы CF_TURN_KEY_ID и CF_TURN_KEY_TOKEN (ключ из Cloudflare →
+// Realtime → TURN), раздаём релей Cloudflare с двойным стеком IPv4+IPv6 —
+// единственный рабочий путь для мобильных операторов с IPv6-only.
+// Иначе — публичный openrelay (только IPv4).
 const FALLBACK_ICE = [
   { urls: ['stun:stun.l.google.com:19302'] },
   {
@@ -47,48 +48,48 @@ const FALLBACK_ICE = [
   },
 ];
 
-let iceCache = { at: 0, servers: null, source: null };
+let iceCache = { at: 0, servers: null };
 
 async function getIceServers() {
-  const accountId = process.env.CF_ACCOUNT_ID;
-  const token = process.env.CF_API_TOKEN;
-  if (!accountId || !token) {
+  const keyId = process.env.CF_TURN_KEY_ID;
+  const keyToken = process.env.CF_TURN_KEY_TOKEN;
+  if (!keyId || !keyToken) {
     return { servers: FALLBACK_ICE, configured: false,
-      error: 'CF_ACCOUNT_ID / CF_API_TOKEN не заданы в окружении' };
+      error: 'CF_TURN_KEY_ID / CF_TURN_KEY_TOKEN не заданы в окружении' };
   }
   if (iceCache.servers && Date.now() - iceCache.at < 6 * 3600 * 1000) {
-    return { servers: iceCache.servers, configured: true, error: null, source: iceCache.source };
+    return { servers: iceCache.servers, configured: true, error: null };
   }
-  let lastError = '';
-  for (const path of ['calls/turn', 'realtime/turn']) {
-    try {
-      const r = await fetch(
-        `https://api.cloudflare.com/client/v4/accounts/${accountId}/${path}`,
-        { headers: { Authorization: `Bearer ${token}` } });
-      let j = null;
-      try { j = await r.json(); } catch (e) {}
-      if (j && j.success && j.result && Array.isArray(j.result.turnURIs)
-          && j.result.turnURIs.length) {
-        iceCache = {
-          at: Date.now(),
-          source: path,
-          servers: [
-            { urls: ['stun:stun.cloudflare.com:3478'] },
-            { urls: j.result.turnURIs, username: j.result.username, credential: j.result.password },
-          ],
-        };
-        console.log(`ICE: Cloudflare TURN получен (${path})`);
-        return { servers: iceCache.servers, configured: true, error: null, source: path };
-      }
-      const cfMsg = j && j.errors && j.errors[0]
-        ? (j.errors[0].message || JSON.stringify(j.errors[0])) : '';
-      lastError = `${path} → HTTP ${r.status}${cfMsg ? ': ' + cfMsg : ''}`;
-    } catch (e) {
-      lastError = `${path} → ${e.message}`;
+  try {
+    const r = await fetch(
+      `https://rtc.live.cloudflare.com/v1/turn/keys/${keyId}/credentials/generate-ice-servers`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${keyToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ ttl: 86400 }),
+      });
+    const j = await r.json().catch(() => null);
+    if ((r.status === 201 || r.status === 200) && j && Array.isArray(j.iceServers)
+        && j.iceServers.length) {
+      const servers = j.iceServers.map((s) => ({
+        urls: Array.isArray(s.urls) ? s.urls : [s.urls],
+        ...(s.username ? { username: s.username } : {}),
+        ...(s.credential ? { credential: s.credential } : {}),
+      }));
+      iceCache = { at: Date.now(), servers };
+      console.log('ICE: Cloudflare TURN получен');
+      return { servers, configured: true, error: null };
     }
+    const msg = `HTTP ${r.status}: ${JSON.stringify(j).slice(0, 200)}`;
+    console.warn('ICE: Cloudflare TURN не получен (' + msg + '), отдаю запасной');
+    return { servers: FALLBACK_ICE, configured: true, error: msg };
+  } catch (e) {
+    console.warn('ICE: Cloudflare TURN недоступен (' + e.message + '), отдаю запасной');
+    return { servers: FALLBACK_ICE, configured: true, error: e.message };
   }
-  console.warn('ICE: Cloudflare TURN не получен (' + lastError + '), отдаю запасной');
-  return { servers: FALLBACK_ICE, configured: true, error: lastError };
 }
 
 const server = http.createServer((req, res) => {
