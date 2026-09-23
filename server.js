@@ -30,6 +30,52 @@ function broadcast(obj, exceptId) {
   for (const id of clients.keys()) if (id !== exceptId) send(id, obj);
 }
 
+// ---------- ICE/TURN-конфигурация ----------
+// Если в окружении заданы CF_ACCOUNT_ID и CF_API_TOKEN (Cloudflare Calls TURN),
+// раздаём рлей с двойным стеком IPv4+IPv6 — единственный рабочий путь для
+// мобильных операторов с IPv6-only. Иначе — публичный openrelay (только IPv4).
+const FALLBACK_ICE = [
+  { urls: ['stun:stun.l.google.com:19302'] },
+  {
+    urls: [
+      'turn:openrelay.metered.ca:80',
+      'turn:openrelay.metered.ca:443?transport=tcp',
+      'turns:openrelay.metered.ca:443?transport=tcp',
+    ],
+    username: 'openrelayproject',
+    credential: 'openrelayproject',
+  },
+];
+
+let iceCache = { at: 0, servers: null };
+
+async function getIceServers() {
+  const accountId = process.env.CF_ACCOUNT_ID;
+  const token = process.env.CF_API_TOKEN;
+  if (accountId && token && Date.now() - iceCache.at > 6 * 3600 * 1000) {
+    try {
+      const r = await fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${accountId}/calls/turn`,
+        { headers: { Authorization: `Bearer ${token}` } });
+      const j = await r.json();
+      if (j && j.success && j.result && Array.isArray(j.result.turnURIs)
+          && j.result.turnURIs.length) {
+        iceCache = {
+          at: Date.now(),
+          servers: [
+            { urls: ['stun:stun.cloudflare.com:3478'] },
+            { urls: j.result.turnURIs, username: j.result.username, credential: j.result.password },
+          ],
+        };
+        console.log('ICE: конфигурация Cloudflare TURN обновлена');
+      }
+    } catch (e) {
+      console.warn('ICE: Cloudflare TURN не получен, используем запасной:', e.message);
+    }
+  }
+  return iceCache.servers || FALLBACK_ICE;
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
@@ -73,6 +119,20 @@ const server = http.createServer((req, res) => {
       }
       res.end();
     });
+    return;
+  }
+
+  // актуальная ICE/TURN-конфигурация для камеры и зрителя
+  if (url.pathname === '/api/ice') {
+    getIceServers()
+      .then((servers) => {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ iceServers: servers }));
+      })
+      .catch(() => {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ iceServers: FALLBACK_ICE }));
+      });
     return;
   }
 

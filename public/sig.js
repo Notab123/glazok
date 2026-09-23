@@ -27,11 +27,9 @@ class Sig {
   }
 }
 
-// ICE-серверы. STUN помогает соединиться напрямую; TURN (Open Relay Project,
-// бесплатный публичный) выручает, когда операторский NAT блокирует прямую
-// связь. TLS-вариант на 443 порту неотличим от обычного HTTPS — проходит
-// даже на мобильных операторах, которые режут UDP.
-const ICE_SERVERS = {
+// ICE-серверы: рабочий набор сервер раздаёт динамически через /api/ice
+// (там может быть IPv6-релей для мобильных операторов). Запасной набор ниже.
+let ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
@@ -39,3 +37,13 @@ const ICE_SERVERS = {
     { urls: 'turns:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
   ],
 };
+
+(async () => {
+  try {
+    const r = await fetch('/api/ice');
+    const j = await r.json();
+    if (j && Array.isArray(j.iceServers) && j.iceServers.length) {
+      ICE_SERVERS = { iceServers: j.iceServers };
+    }
+  } catch (e) { /* остаётся запасной набор */ }
+})();
