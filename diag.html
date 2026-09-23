@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глазок — диагностика сети</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 20px; font-family: system-ui, sans-serif; background: #101418; color: #e8ecf1; }
+  h1 { font-size: 22px; }
+  p { color: #9fb0c0; line-height: 1.5; }
+  table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #242b33; font-size: 14px; }
+  th { color: #9fb0c0; font-weight: 600; }
+  td.res { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .ok { color: #7ee08a; }
+  .bad { color: #ff6b6b; }
+  small { color: #6d7d8d; }
+</style>
+</head>
+<body>
+<h1>👁 Диагностика сети для «Глазка»</h1>
+<p id="net">Определяем сеть…</p>
+<table id="t">
+  <tr><th>Проверка</th><th>Результат</th></tr>
+</table>
+<p id="sum"></p>
+<p><small>Открой эту страницу на телефоне в той сети, где не работает (мобильный интернет), и пришли скриншот или список ✓/✗.</small></p>
+<script>
+function netInfo() {
+  const c = navigator.connection || {};
+  document.getElementById('net').textContent =
+    'Сеть: ' + (c.effectiveType || '?') + (c.rtt ? ' · примерная задержка ' + c.rtt + ' мс' : '');
+}
+
+const rowIds = [];
+function addRow(name) {
+  const tr = document.createElement('tr');
+  const id = 'r' + rowIds.length;
+  rowIds.push(id);
+  tr.innerHTML = '<td>' + name + '</td><td class="res" id="' + id + '">проверяю…</td>';
+  document.getElementById('t').appendChild(tr);
+  return document.getElementById(id);
+}
+
+function gather(iceServers, timeoutMs) {
+  return new Promise((resolve) => {
+    const pc = new RTCPeerConnection({ iceServers: iceServers });
+    const found = {};
+    const t0 = performance.now();
+    let timer = null;
+    function finish() {
+      if (timer) clearTimeout(timer);
+      try { pc.close(); } catch (e) {}
+      resolve(found);
+    }
+    pc.onicecandidate = (e) => {
+      if (!e.candidate) { finish(); return; }
+      const parts = e.candidate.candidate.split(' ');
+      const type = parts[7], proto = parts[2].toLowerCase(), ip = parts[4] || '';
+      if (type === 'relay' || type === 'srflx') {
+        if (!found.ms) found.ms = Math.round(performance.now() - t0);
+        found[type + '/' + proto] = true;
+        found.ip = ip;
+      }
+    };
+    pc.createDataChannel('x');
+    pc.createOffer()
+      .then((o) => pc.setLocalDescription(o))
+      .catch(() => finish());
+    timer = setTimeout(finish, timeoutMs || 9000);
+  });
+}
+
+(async () => {
+  netInfo();
+  const U = 'openrelayproject', P = 'openrelayproject';
+  const results = [];
+  const tests = [
+    ['Прямое соединение (STUN Google)', [{ urls: 'stun:stun.l.google.com:19302' }], 'srflx'],
+    ['Прямое соединение (STUN Cloudflare)', [{ urls: 'stun:stun.cloudflare.com:3478' }], 'srflx'],
+    ['Релей UDP (openrelay :80)', [{ urls: 'turn:openrelay.metered.ca:80', username: U, credential: P }], 'relay'],
+    ['Релей TCP (openrelay :443)', [{ urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: U, credential: P }], 'relay'],
+    ['Релей TLS-как-HTTPS (openrelay :443)', [{ urls: 'turns:openrelay.metered.ca:443?transport=tcp', username: U, credential: P }], 'relay'],
+  ];
+  for (const [name, servers, want] of tests) {
+    const cell = addRow(name);
+    const res = await gather(servers);
+    const ok = Object.keys(res).some((k) => k.indexOf(want) === 0);
+    results.push(ok);
+    cell.textContent = (ok ? '✅ ' : '❌ ') + (ok ? res.ms + ' мс · ' + res.ip : 'нет ответа');
+    cell.className = 'res ' + (ok ? 'ok' : 'bad');
+  }
+  const good = results.filter(Boolean).length;
+  document.getElementById('sum').textContent = good === 0
+    ? '❌ Всё заблокировано — оператор режет WebRTC полностью. Скажи оператора, подберу обход.'
+    : ('✅ Работает путей: ' + good + ' из ' + results.length + '. Пришли скриншот таблицы.');
+})();
+</script>
+</body>
+</html>
