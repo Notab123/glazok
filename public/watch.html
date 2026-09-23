@@ -15,6 +15,8 @@
   video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; transition: transform .12s ease-out; }
   video:active { transition: none; }
   .zoomhint { position: absolute; right: 10px; bottom: 10px; font-size: 12px; color: #9fb0c0; background: #0009; padding: 4px 8px; border-radius: 8px; opacity: .8; }
+  #statsPanel { position: absolute; left: 10px; top: 10px; font: 12px/1.6 ui-monospace, monospace; color: #e8ecf1; background: #000a; padding: 8px 12px; border-radius: 10px; white-space: pre; pointer-events: none; }
+  #statsPanel.hidden { display: none; }
 
   .bar { padding: 8px 12px; display: flex; flex-direction: column; gap: 8px; }
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
@@ -49,6 +51,8 @@
         <button id="zoomIn" class="secondary" disabled>+</button>
         <button id="zoomReset" class="secondary hidden">1:1</button>
         <button id="mute" class="secondary">🔊 Звук: вкл</button>
+        <button id="buf" class="secondary">💾 Буфер: вкл</button>
+        <button id="statsBtn" class="secondary">📊</button>
         <button id="fs" class="secondary">⛶</button>
       </div>
     </div>
@@ -61,6 +65,7 @@
   <div id="stage">
     <video id="remote" autoplay playsinline></video>
     <div class="zoomhint">щипок — зум · двойной тап — сброс</div>
+    <div id="statsPanel" class="hidden"></div>
   </div>
 </main>
 <script src="sig.js"></script>
@@ -124,7 +129,7 @@ async function connect(id) {
   pc.onconnectionstatechange = () => {
     if (pc.connectionState === 'connected') {
       setStatus('Смотрим эфир', 'live');
-      recBtn.disabled = false; zoomInBtn.disabled = false; zoomOutBtn.disabled = false;
+      recBtn.disabled = !bufferOn; zoomInBtn.disabled = false; zoomOutBtn.disabled = false;
     }
     if (pc.connectionState === 'failed') {
       setStatus('Не удалось подключиться, пробуем ещё раз…', 'error');
@@ -180,6 +185,7 @@ function onStream(stream) {
 }
 
 function startBuffer(stream) {
+  if (!bufferOn) return;
   stopBuffer();
   chunks.length = 0; chunkTimes.length = 0; totalBytes = 0;
   if (!window.MediaRecorder) { setStatus('Браузер не умеет записывать — откат недоступен'); return; }
@@ -377,6 +383,78 @@ muteBtn.onclick = () => {
 fsBtn.onclick = () => {
   if (document.fullscreenElement) document.exitFullscreen();
   else document.getElementById('stage').requestFullscreen?.();
+};
+
+// ---------- статистика канала ----------
+
+const statsPanel = document.getElementById('statsPanel');
+let statsOn = false, statsTimer = null;
+let stBytes = 0, stFrames = 0, stT = 0;
+
+document.getElementById('statsBtn').onclick = () => {
+  statsOn = !statsOn;
+  statsPanel.classList.toggle('hidden', !statsOn);
+  if (statsOn && !statsTimer) statsTimer = setInterval(pollStats, 2000);
+  if (!statsOn && statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+};
+
+async function pollStats() {
+  if (!pc) return;
+  let res = '', lost = '', rtt = '', via = '';
+  let bytes = 0, frames = 0, now = Date.now();
+  try {
+    const stats = await pc.getStats();
+    const cands = {};
+    let pair = null;
+    stats.forEach((r) => {
+      if (r.type === 'local-candidate' || r.type === 'remote-candidate') cands[r.id] = r;
+      if (r.type === 'candidate-pair' && r.state === 'succeeded' && (r.selected || r.nominated)) pair = r;
+      if (r.type === 'inbound-rtp' && r.kind === 'video') {
+        bytes = r.bytesReceived || 0;
+        frames = r.framesDecoded || 0;
+        res = (r.frameWidth || '?') + '×' + (r.frameHeight || '?');
+        lost = (r.packetsLost || 0) + ' пак. потеряно';
+      }
+    });
+    if (pair) {
+      if (pair.currentRoundTripTime != null) rtt = (pair.currentRoundTripTime * 1000).toFixed(0) + ' мс задержка';
+      const lc = cands[pair.localCandidateId];
+      via = lc && lc.candidateType === 'relay' ? 'ЧЕРЕЗ РЕЛЕЙ (медленно)' : 'напрямую';
+    }
+  } catch (e) { return; }
+
+  let line1 = res ? res : 'нет данных';
+  if (stT && bytes >= stBytes && now > stT) {
+    const mbps = ((bytes - stBytes) * 8 / (now - stT) / 1000).toFixed(1);
+    const fps = ((frames - stFrames) * 1000 / (now - stT)).toFixed(0);
+    line1 += ` · ${fps} к/с · ${mbps} Мбит/с`;
+  }
+  stBytes = bytes; stFrames = frames; stT = now;
+  const spanMin = Math.floor(bufferSpanMs() / 60000);
+  const spanSec = Math.floor((bufferSpanMs() % 60000) / 1000);
+  statsPanel.textContent = line1
+    + (rtt ? `\n${rtt} · ${via}` : '')
+    + (lost ? `\n${lost}` : '')
+    + `\nбуфер: ${spanMin}:${String(spanSec).padStart(2, '0')}`;
+}
+
+// ---------- включение/выключение буфера ----------
+
+let bufferOn = true;
+const bufBtn = document.getElementById('buf');
+bufBtn.onclick = () => {
+  bufferOn = !bufferOn;
+  bufBtn.textContent = bufferOn ? '💾 Буфер: вкл' : '💾 Буфер: выкл';
+  if (bufferOn && liveStream && pc && pc.connectionState === 'connected') {
+    startBuffer(liveStream);
+  } else if (!bufferOn) {
+    stopBuffer();
+    enterLive();
+    chunks.length = 0; chunkTimes.length = 0; totalBytes = 0;
+    recordingIdx = -1;
+    recBtn.disabled = true;
+    timeline.style.display = 'none';
+  }
 };
 
 // ---------- сигналинг ----------
