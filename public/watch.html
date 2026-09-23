@@ -11,40 +11,73 @@
   * { box-sizing: border-box; }
   body { margin: 0; font-family: system-ui, sans-serif; background: #101418; color: #e8ecf1; }
   main { height: 100dvh; display: flex; flex-direction: column; }
-  video { flex: 1; width: 100%; min-height: 0; object-fit: contain; background: #000; }
-  .bar { padding: 12px 16px; display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
-  #status { font-size: 15px; color: #9fb0c0; line-height: 1.4; }
+  #stage { position: relative; flex: 1; min-height: 0; background: #000; overflow: hidden; touch-action: none; }
+  video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; transition: transform .12s ease-out; }
+  video:active { transition: none; }
+  .zoomhint { position: absolute; right: 10px; bottom: 10px; font-size: 12px; color: #9fb0c0; background: #0009; padding: 4px 8px; border-radius: 8px; opacity: .8; }
+
+  .bar { padding: 8px 12px; display: flex; flex-direction: column; gap: 8px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  #status { font-size: 14px; color: #9fb0c0; line-height: 1.4; flex: 1; min-width: 140px; }
   #status.live { color: #7ee08a; }
   #status.error { color: #ff6b6b; }
-  button { font: inherit; background: #2b7cff; color: #fff; border: 0; border-radius: 12px; padding: 10px 16px; cursor: pointer; }
+  #status.replay { color: #ffd166; }
+
+  button { font: inherit; background: #2b7cff; color: #fff; border: 0; border-radius: 12px; padding: 10px 14px; cursor: pointer; }
   button.secondary { background: #242b33; color: #e8ecf1; }
   button.hidden { display: none; }
   button:active { transform: scale(0.97); }
+  button:disabled { opacity: .4; }
+  button.rec-on { background: #d33a3a; animation: pulse 1.2s infinite; }
+  @keyframes pulse { 50% { opacity: .65; } }
+
+  .timeline { display: flex; align-items: center; gap: 10px; }
+  input[type=range] { flex: 1; accent-color: #2b7cff; }
+  #tlLabel { font-size: 13px; color: #9fb0c0; min-width: 64px; text-align: right; font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
 <main>
   <div class="bar">
-    <div>
+    <div class="row">
       <button id="connect">▶ Смотреть</button>
-      <button id="sound" class="secondary hidden">🔇 Включить звук</button>
+      <button id="tolive" class="secondary hidden">⏪ В эфир</button>
+      <div id="status" style="display:none"></div>
+      <div class="row" style="gap:8px">
+        <button id="rec" class="secondary" disabled>● REC</button>
+        <button id="zoomOut" class="secondary" disabled>−</button>
+        <button id="zoomIn" class="secondary" disabled>+</button>
+        <button id="zoomReset" class="secondary hidden">1:1</button>
+        <button id="mute" class="secondary">🔊 Звук: вкл</button>
+        <button id="fs" class="secondary">⛶</button>
+      </div>
     </div>
-    <div id="status" style="display:none"></div>
-    <div style="display:flex; gap:12px;">
-      <button id="mute" class="secondary">🔊 Звук: вкл</button>
-      <button id="fs" class="secondary">⛶ Во весь экран</button>
+    <div class="timeline" id="timeline" style="display:none">
+      <span style="font-size:13px;color:#7ee08a">эфир</span>
+      <input type="range" id="seek" min="0" max="0" value="0" step="1" disabled>
+      <span id="tlLabel">−0:00</span>
     </div>
   </div>
-  <video id="remote" autoplay playsinline></video>
+  <div id="stage">
+    <video id="remote" autoplay playsinline></video>
+    <div class="zoomhint">щипок — зум · двойной тап — сброс</div>
+  </div>
 </main>
 <script src="sig.js"></script>
 <script>
 const remote   = document.getElementById('remote');
 const statusEl = document.getElementById('status');
 const connectBtn = document.getElementById('connect');
-const soundBtn   = document.getElementById('sound');
+const toliveBtn  = document.getElementById('tolive');
+const recBtn     = document.getElementById('rec');
+const zoomInBtn  = document.getElementById('zoomIn');
+const zoomOutBtn = document.getElementById('zoomOut');
+const zoomResetBtn = document.getElementById('zoomReset');
 const muteBtn    = document.getElementById('mute');
 const fsBtn      = document.getElementById('fs');
+const seek       = document.getElementById('seek');
+const tlLabel    = document.getElementById('tlLabel');
+const timeline   = document.getElementById('timeline');
 
 const peers = new Map();          // id -> роль ('camera' / 'watch')
 let cameraId = null;
@@ -52,12 +85,16 @@ let pc = null;
 let started = false;
 let remoteSet = false;
 const iceQueue = [];
+let liveStream = null;            // текущий входящий поток
+let liveMode = true;              // смотрим эфир (true) или откат (false)
 
 function setStatus(text, cls) {
   statusEl.style.display = 'block';
   statusEl.textContent = text;
   statusEl.className = cls || '';
 }
+
+// ---------- подключение ----------
 
 function findCamera() {
   for (const [id, role] of peers) if (role === 'camera') return id;
@@ -74,23 +111,25 @@ function cleanup() {
 
 async function connect(id) {
   cleanup();
+  enterLive();
   cameraId = id;
   setStatus('Подключаемся к камере…');
   pc = new RTCPeerConnection(ICE_SERVERS);
   pc.addTransceiver('video', { direction: 'recvonly' });
   pc.addTransceiver('audio', { direction: 'recvonly' });
-  pc.ontrack = (e) => {
-    remote.srcObject = e.streams[0];
-    tryPlay();
-  };
+  pc.ontrack = (e) => onStream(e.streams[0]);
   pc.onicecandidate = (e) => {
     if (e.candidate) sig.send(cameraId, { kind: 'ice', candidate: e.candidate });
   };
   pc.onconnectionstatechange = () => {
-    if (pc.connectionState === 'connected') setStatus('Смотрим трансляцию', 'live');
+    if (pc.connectionState === 'connected') {
+      setStatus('Смотрим эфир', 'live');
+      recBtn.disabled = false; zoomInBtn.disabled = false; zoomOutBtn.disabled = false;
+    }
     if (pc.connectionState === 'failed') {
       setStatus('Не удалось подключиться, пробуем ещё раз…', 'error');
       cleanup();
+      enterLive();
       setTimeout(() => { if (started) autoConnect(); }, 2000);
     }
   };
@@ -114,19 +153,218 @@ async function tryPlay() {
   try {
     await remote.play();
   } catch {
-    // браузер запретил автозапуск со звуком — включаем без звука и даём кнопку
     remote.muted = true;
     updateMuteBtn();
     try { await remote.play(); } catch {}
-    soundBtn.classList.remove('hidden');
+    soundBtnShow();
   }
 }
 
-soundBtn.onclick = async () => {
-  remote.muted = false;
-  updateMuteBtn();
-  try { await remote.play(); soundBtn.classList.add('hidden'); } catch {}
+const soundBtn = null; // кнопка звука совмещена с mute
+function soundBtnShow() {}
+
+// ---------- буфер для отката и записи ----------
+
+const chunks = [];      // Blobs по ~2 секунды
+const chunkTimes = [];  // время конца каждого чанка
+let totalBytes = 0;
+let recorder = null;
+const MAX_BYTES = 250 * 1024 * 1024;   // ~250 МБ в памяти
+const MAX_MS   = 20 * 60 * 1000;       // до 20 минут назад
+
+function onStream(stream) {
+  if (liveStream && liveStream.id === stream.id) return;
+  liveStream = stream;
+  if (liveMode) { remote.srcObject = stream; tryPlay(); }
+  startBuffer(stream);
+}
+
+function startBuffer(stream) {
+  stopBuffer();
+  chunks.length = 0; chunkTimes.length = 0; totalBytes = 0;
+  if (!window.MediaRecorder) { setStatus('Браузер не умеет записывать — откат недоступен'); return; }
+  const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')
+    ? 'video/webm;codecs=vp8,opus'
+    : (MediaRecorder.isTypeSupported('video/webm') ? 'video/webm' : '');
+  try {
+    recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+  } catch (e) { recorder = null; return; }
+  recorder.ondataavailable = (e) => {
+    if (!e.data || !e.data.size) return;
+    chunks.push(e.data);
+    chunkTimes.push(Date.now());
+    totalBytes += e.data.size;
+    trimBuffer();
+    if (recordingIdx < 0) updateTimeline();
+  };
+  recorder.start(2000);
+  timeline.style.display = 'flex';
+}
+
+function stopBuffer() {
+  if (recorder && recorder.state !== 'inactive') recorder.stop();
+  recorder = null;
+}
+
+function trimBuffer() {
+  const cutoff = Date.now() - MAX_MS;
+  while (chunks.length > 1 && (totalBytes > MAX_BYTES || chunkTimes[0] < cutoff)) {
+    totalBytes -= chunks[0].size;
+    if (recordingIdx === 0) recordingIdx = 1; // не терять начало записи
+    chunks.shift(); chunkTimes.shift();
+  }
+}
+
+function bufferSpanMs() {
+  return chunks.length ? Date.now() - (chunkTimes[0] - 2000) : 0;
+}
+
+// ---------- таймлайн / откат ----------
+
+function fmtMs(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return `−${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+function updateTimeline() {
+  const span = bufferSpanMs();
+  seek.max = Math.max(0, Math.floor(span / 1000));
+  seek.disabled = chunks.length < 2;
+  if (liveMode) { seek.value = 0; tlLabel.textContent = '−0:00'; }
+}
+
+seek.addEventListener('input', () => { tlLabel.textContent = fmtMs(seek.value * 1000); });
+seek.addEventListener('change', () => {
+  const back = seek.value * 1000;
+  if (back < 4000) { enterLive(); return; }  // у самого края — это снова эфир
+  enterReplay(back);
+});
+
+let replayUrl = null;
+
+function enterReplay(msBack) {
+  if (!chunks.length) return;
+  const targetT = Date.now() - msBack;
+  let idx = chunkTimes.findIndex((t) => t >= targetT);
+  if (idx < 0) idx = 0;
+  const blob = new Blob(chunks.slice(idx), { type: chunks[idx].type || 'video/webm' });
+  if (replayUrl) URL.revokeObjectURL(replayUrl);
+  replayUrl = URL.createObjectURL(blob);
+  liveMode = false;
+  remote.srcObject = null;
+  remote.src = replayUrl;
+  remote.play().catch(() => {});
+  toliveBtn.classList.remove('hidden');
+  setStatus(`Откат: ${fmtMs(msBack)} назад`, 'replay');
+  remote.onended = () => enterLive();
+}
+
+function enterLive() {
+  liveMode = true;
+  remote.onended = null;
+  if (replayUrl) { URL.revokeObjectURL(replayUrl); replayUrl = null; }
+  remote.removeAttribute('src');
+  if (liveStream) { remote.srcObject = liveStream; tryPlay(); }
+  toliveBtn.classList.add('hidden');
+  seek.value = 0;
+  tlLabel.textContent = '−0:00';
+  if (pc && pc.connectionState === 'connected') setStatus('Смотрим эфир', 'live');
+}
+
+toliveBtn.onclick = () => enterLive();
+
+// ---------- запись в файл ----------
+
+let recordingIdx = -1;
+let recTimer = null;
+
+recBtn.onclick = () => {
+  if (recordingIdx < 0) {
+    if (!chunks.length) return;
+    recordingIdx = Math.max(0, chunks.length - 1);
+    recBtn.classList.add('rec-on');
+    recBtn.textContent = '■ СТОП';
+    const t0 = Date.now();
+    recTimer = setInterval(() => {
+      const s = Math.round((Date.now() - t0) / 1000);
+      recBtn.textContent = `■ ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+    }, 500);
+  } else {
+    const start = recordingIdx;
+    recordingIdx = -1;
+    clearInterval(recTimer);
+    recBtn.classList.remove('rec-on');
+    recBtn.textContent = '● REC';
+    if (chunks.length <= start) { setStatus('Запись пустая — слишком короткая', 'error'); return; }
+    const blob = new Blob(chunks.slice(start), { type: chunks[start].type || 'video/webm' });
+    const d = new Date();
+    const name = `glazok-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}-${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}.webm`;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+    setStatus(`Ролик сохранён (${(blob.size / 1048576).toFixed(1)} МБ)`, 'live');
+  }
 };
+
+// ---------- зум ----------
+
+let scale = 1, panX = 0, panY = 0;
+const pointers = new Map();
+let pinchDist = 0, pinchScale = 1;
+
+function applyZoom() {
+  if (scale <= 1.001) { scale = 1; panX = 0; panY = 0; }
+  const w = remote.clientWidth, h = remote.clientHeight;
+  const mx = w * (scale - 1) / 2, my = h * (scale - 1) / 2;
+  panX = Math.max(-mx, Math.min(mx, panX));
+  panY = Math.max(-my, Math.min(my, panY));
+  remote.style.transform = scale === 1 ? '' : `translate(${panX}px, ${panY}px) scale(${scale.toFixed(3)})`;
+  zoomResetBtn.classList.toggle('hidden', scale === 1);
+}
+
+zoomInBtn.onclick  = () => { scale = Math.min(6, scale * 1.3); applyZoom(); };
+zoomOutBtn.onclick = () => { scale = Math.max(1, scale / 1.3); applyZoom(); };
+zoomResetBtn.onclick = () => { scale = 1; applyZoom(); };
+remote.addEventListener('dblclick', () => { scale = scale > 1 ? 1 : 2; applyZoom(); });
+
+const stage = document.getElementById('stage');
+stage.addEventListener('pointerdown', (e) => {
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    pinchDist = Math.hypot(a.x - b.x, a.y - b.y);
+    pinchScale = scale;
+  }
+});
+stage.addEventListener('pointermove', (e) => {
+  if (!pointers.has(e.pointerId)) return;
+  const prev = pointers.get(e.pointerId);
+  const cur = { x: e.clientX, y: e.clientY };
+  pointers.set(e.pointerId, cur);
+  if (pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    const d = Math.hypot(a.x - b.x, a.y - b.y);
+    if (pinchDist > 0) {
+      scale = Math.max(1, Math.min(6, pinchScale * (d / pinchDist)));
+      applyZoom();
+    }
+  } else if (pointers.size === 1 && scale > 1) {
+    panX += cur.x - prev.x;
+    panY += cur.y - prev.y;
+    applyZoom();
+  }
+});
+const dropPointer = (e) => {
+  pointers.delete(e.pointerId);
+  pinchDist = 0;
+};
+stage.addEventListener('pointerup', dropPointer);
+stage.addEventListener('pointercancel', dropPointer);
+stage.addEventListener('pointerleave', dropPointer);
+
+// ---------- звук / полный экран ----------
 
 function updateMuteBtn() {
   muteBtn.textContent = remote.muted ? '🔇 Звук: выкл' : '🔊 Звук: вкл';
@@ -134,13 +372,14 @@ function updateMuteBtn() {
 muteBtn.onclick = () => {
   remote.muted = !remote.muted;
   updateMuteBtn();
-  soundBtn.classList.add('hidden');
 };
 
 fsBtn.onclick = () => {
   if (document.fullscreenElement) document.exitFullscreen();
-  else remote.requestFullscreen?.();
+  else document.getElementById('stage').requestFullscreen?.();
 };
+
+// ---------- сигналинг ----------
 
 const sig = new Sig('watch', onMsg);
 
@@ -152,6 +391,7 @@ async function onMsg(m) {
     peers.delete(m.id);
     if (m.id === cameraId) {
       cleanup();
+      enterLive();
       setStatus('Камера закрыла трансляцию. Ждём…');
       if (started) setTimeout(autoConnect, 1500);
     }
@@ -176,6 +416,9 @@ connectBtn.onclick = () => {
   if (id) connect(id).catch(() => {});
   else setStatus('Ждём, пока камера запустится…');
 };
+
+updateMuteBtn();
+setInterval(updateTimeline, 1000);
 </script>
 </body>
 </html>
