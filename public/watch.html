@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#101418">
+<link rel="icon" href="data:,">
+<title>Глазок — зритель</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; background: #101418; color: #e8ecf1; }
+  main { height: 100dvh; display: flex; flex-direction: column; }
+  video { flex: 1; width: 100%; min-height: 0; object-fit: contain; background: #000; }
+  .bar { padding: 12px 16px; display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+  #status { font-size: 15px; color: #9fb0c0; line-height: 1.4; }
+  #status.live { color: #7ee08a; }
+  #status.error { color: #ff6b6b; }
+  button { font: inherit; background: #2b7cff; color: #fff; border: 0; border-radius: 12px; padding: 10px 16px; cursor: pointer; }
+  button.secondary { background: #242b33; color: #e8ecf1; }
+  button.hidden { display: none; }
+  button:active { transform: scale(0.97); }
+</style>
+</head>
+<body>
+<main>
+  <div class="bar">
+    <div>
+      <button id="connect">▶ Смотреть</button>
+      <button id="sound" class="secondary hidden">🔇 Включить звук</button>
+    </div>
+    <div id="status" style="display:none"></div>
+    <div style="display:flex; gap:12px;">
+      <button id="mute" class="secondary">🔊 Звук: вкл</button>
+      <button id="fs" class="secondary">⛶ Во весь экран</button>
+    </div>
+  </div>
+  <video id="remote" autoplay playsinline></video>
+</main>
+<script src="sig.js"></script>
+<script>
+const remote   = document.getElementById('remote');
+const statusEl = document.getElementById('status');
+const connectBtn = document.getElementById('connect');
+const soundBtn   = document.getElementById('sound');
+const muteBtn    = document.getElementById('mute');
+const fsBtn      = document.getElementById('fs');
+
+const peers = new Map();          // id -> роль ('camera' / 'watch')
+let cameraId = null;
+let pc = null;
+let started = false;
+let remoteSet = false;
+const iceQueue = [];
+
+function setStatus(text, cls) {
+  statusEl.style.display = 'block';
+  statusEl.textContent = text;
+  statusEl.className = cls || '';
+}
+
+function findCamera() {
+  for (const [id, role] of peers) if (role === 'camera') return id;
+  return null;
+}
+
+function cleanup() {
+  if (pc) { pc.onicecandidate = null; pc.close(); }
+  pc = null;
+  cameraId = null;
+  remoteSet = false;
+  iceQueue.length = 0;
+}
+
+async function connect(id) {
+  cleanup();
+  cameraId = id;
+  setStatus('Подключаемся к камере…');
+  pc = new RTCPeerConnection(ICE_SERVERS);
+  pc.addTransceiver('video', { direction: 'recvonly' });
+  pc.addTransceiver('audio', { direction: 'recvonly' });
+  pc.ontrack = (e) => {
+    remote.srcObject = e.streams[0];
+    tryPlay();
+  };
+  pc.onicecandidate = (e) => {
+    if (e.candidate) sig.send(cameraId, { kind: 'ice', candidate: e.candidate });
+  };
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'connected') setStatus('Смотрим трансляцию', 'live');
+    if (pc.connectionState === 'failed') {
+      setStatus('Не удалось подключиться, пробуем ещё раз…', 'error');
+      cleanup();
+      setTimeout(() => { if (started) autoConnect(); }, 2000);
+    }
+  };
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  const ok = await sig.send(cameraId, { kind: 'offer', sdp: pc.localDescription });
+  if (!ok) {
+    setStatus('Камера недоступна, пробуем ещё раз…', 'error');
+    cleanup();
+    setTimeout(() => { if (started) autoConnect(); }, 2000);
+  }
+}
+
+function autoConnect() {
+  if (pc && ['new', 'connecting', 'connected'].includes(pc.connectionState)) return;
+  const id = findCamera();
+  if (id) connect(id).catch(() => {});
+}
+
+async function tryPlay() {
+  try {
+    await remote.play();
+  } catch {
+    // браузер запретил автозапуск со звуком — включаем без звука и даём кнопку
+    remote.muted = true;
+    updateMuteBtn();
+    try { await remote.play(); } catch {}
+    soundBtn.classList.remove('hidden');
+  }
+}
+
+soundBtn.onclick = async () => {
+  remote.muted = false;
+  updateMuteBtn();
+  try { await remote.play(); soundBtn.classList.add('hidden'); } catch {}
+};
+
+function updateMuteBtn() {
+  muteBtn.textContent = remote.muted ? '🔇 Звук: выкл' : '🔊 Звук: вкл';
+}
+muteBtn.onclick = () => {
+  remote.muted = !remote.muted;
+  updateMuteBtn();
+  soundBtn.classList.add('hidden');
+};
+
+fsBtn.onclick = () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else remote.requestFullscreen?.();
+};
+
+const sig = new Sig('watch', onMsg);
+
+async function onMsg(m) {
+  if (m.type === 'peer') {
+    peers.set(m.id, m.role);
+    if (started) autoConnect();
+  } else if (m.type === 'bye') {
+    peers.delete(m.id);
+    if (m.id === cameraId) {
+      cleanup();
+      setStatus('Камера закрыла трансляцию. Ждём…');
+      if (started) setTimeout(autoConnect, 1500);
+    }
+  } else if (m.type === 'signal') {
+    const d = m.data;
+    if (!pc || m.from !== cameraId) return;
+    if (d.kind === 'answer') {
+      await pc.setRemoteDescription(d.sdp);
+      remoteSet = true;
+      while (iceQueue.length) await pc.addIceCandidate(iceQueue.shift()).catch(() => {});
+    } else if (d.kind === 'ice') {
+      if (remoteSet) await pc.addIceCandidate(d.candidate).catch(() => {});
+      else iceQueue.push(d.candidate);
+    }
+  }
+}
+
+connectBtn.onclick = () => {
+  started = true;
+  connectBtn.classList.add('hidden');
+  const id = findCamera();
+  if (id) connect(id).catch(() => {});
+  else setStatus('Ждём, пока камера запустится…');
+};
+</script>
+</body>
+</html>

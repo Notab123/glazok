@@ -1,0 +1,12 @@
+{
+  "name": "glazok",
+  "version": "1.0.0",
+  "description": "Глазок — телефон-камера: открытая трансляция с камеры телефона",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

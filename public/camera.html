@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#101418">
+<link rel="icon" href="data:,">
+<title>Глазок — камера</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; background: #101418; color: #e8ecf1; }
+  main { height: 100dvh; display: flex; flex-direction: column; }
+  video { flex: 1; width: 100%; min-height: 0; object-fit: cover; background: #000; }
+  .bar { padding: 12px 16px; display: flex; gap: 12px; align-items: center; justify-content: space-between; }
+  #status { font-size: 15px; color: #9fb0c0; line-height: 1.4; }
+  #status.live { color: #7ee08a; }
+  #status.error { color: #ff6b6b; }
+  button { font: inherit; background: #242b33; color: #e8ecf1; border: 0; border-radius: 12px; padding: 10px 16px; cursor: pointer; }
+  button:active { transform: scale(0.97); }
+</style>
+</head>
+<body>
+<main>
+  <div class="bar">
+    <div id="status">Запрос доступа к камере…</div>
+    <button id="switch">Сменить камеру</button>
+  </div>
+  <video id="preview" autoplay playsinline muted></video>
+</main>
+<script src="sig.js"></script>
+<script>
+const statusEl = document.getElementById('status');
+const preview  = document.getElementById('preview');
+
+let stream = null;
+let facing = 'environment';                 // по умолчанию — задняя камера
+const pcs = new Map();                      // зрительId -> RTCPeerConnection
+const iceBuffers = new Map();               // зрительId -> кандидаты до offer/answer
+const remoteSet = new Set();                // у кого уже установлен remote description
+
+function setStatus(text, cls) {
+  statusEl.textContent = text;
+  statusEl.className = cls || '';
+}
+
+function countLive() {
+  let n = 0;
+  for (const pc of pcs.values()) if (pc.connectionState === 'connected') n++;
+  return n;
+}
+
+// ---------- камера ----------
+
+async function startCamera() {
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } },
+    audio: { echoCancellation: true, noiseSuppression: true },
+  });
+  preview.srcObject = stream;
+
+  // если зрители уже подключены — подменяем им дорожки на новые
+  for (const pc of pcs.values()) {
+    for (const sender of pc.getSenders()) {
+      if (!sender.track) continue;
+      const track = stream.getTracks().find((t) => t.kind === sender.track.kind);
+      if (track) sender.replaceTrack(track).catch(() => {});
+    }
+  }
+  setStatus(`Трансляция идёт · зрителей: ${countLive()}`, 'live');
+}
+
+document.getElementById('switch').onclick = async () => {
+  facing = facing === 'environment' ? 'user' : 'environment';
+  try {
+    await startCamera();
+  } catch (err) {
+    setStatus(`Не переключить камеру: ${err.message}`, 'error');
+  }
+};
+
+// ---------- WebRTC: отвечаем на offer-ы зрителей ----------
+
+const sig = new Sig('camera', onMsg);
+
+async function onMsg(m) {
+  if (m.type !== 'signal') return;
+  const from = m.from, d = m.data;
+  if (d.kind === 'offer') await onOffer(from, d.sdp);
+  else if (d.kind === 'ice') await addIce(from, d.candidate);
+}
+
+async function onOffer(from, sdp) {
+  const old = pcs.get(from);
+  if (old) old.close();
+  const pc = new RTCPeerConnection(ICE_SERVERS);
+  pcs.set(from, pc);
+  remoteSet.delete(from);
+  if (!iceBuffers.has(from)) iceBuffers.set(from, []);
+
+  stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+  pc.onicecandidate = (e) => {
+    if (e.candidate) sig.send(from, { kind: 'ice', candidate: e.candidate });
+  };
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+      pc.close();
+      pcs.delete(from);
+    }
+    setStatus(`Трансляция идёт · зрителей: ${countLive()}`, 'live');
+  };
+
+  await pc.setRemoteDescription(sdp);
+  remoteSet.add(from);
+  await flushIce(from);
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  sig.send(from, { kind: 'answer', sdp: pc.localDescription });
+}
+
+async function addIce(from, cand) {
+  const pc = pcs.get(from);
+  if (!pc || !remoteSet.has(from)) {
+    if (!iceBuffers.has(from)) iceBuffers.set(from, []);
+    iceBuffers.get(from).push(cand);
+    return;
+  }
+  await pc.addIceCandidate(cand).catch(() => {});
+}
+
+async function flushIce(from) {
+  const buf = iceBuffers.get(from) || [];
+  const pc = pcs.get(from);
+  while (buf.length && pc) await pc.addIceCandidate(buf.shift()).catch(() => {});
+}
+
+// ---------- не гасить экран ----------
+
+let wakeLock = null;
+async function keepAwake() {
+  try {
+    if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
+  } catch {}
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') keepAwake();
+});
+
+// ---------- запуск ----------
+
+(async () => {
+  keepAwake();
+  try {
+    await startCamera();
+  } catch (err) {
+    setStatus(`Нет доступа к камере: ${err.message}. Разреши доступ в браузере и обнови страницу.`, 'error');
+  }
+})();
+</script>
+</body>
+</html>

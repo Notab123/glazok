@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#101418">
+<link rel="icon" href="data:,">
+<title>Глазок — телефон-камера</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: system-ui, sans-serif;
+    background: #101418; color: #e8ecf1;
+    min-height: 100dvh; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 24px;
+    padding: 24px; text-align: center;
+  }
+  h1 { font-size: 34px; margin: 0; }
+  p.sub { color: #9fb0c0; margin: 0; max-width: 34em; line-height: 1.5; }
+  nav { display: flex; flex-direction: column; gap: 14px; width: min(340px, 100%); }
+  a.button {
+    display: block; padding: 18px 20px; border-radius: 16px;
+    text-decoration: none; font-size: 18px; font-weight: 600;
+  }
+  a.cam  { background: #2b7cff; color: #fff; }
+  a.watch{ background: #242b33; color: #e8ecf1; }
+  ol { color: #9fb0c0; text-align: left; max-width: 34em; line-height: 1.7; padding-left: 20px; margin: 0; }
+</style>
+</head>
+<body>
+  <h1>👁 Глазок</h1>
+  <p class="sub">Телефон превращается в камеру, а смотреть можно с любого другого устройства. Трансляция открытая: владелец телефона сам её запускает и видит, что она идёт.</p>
+  <nav>
+    <a class="cam" href="/camera.html">📷 Этот телефон — камера</a>
+    <a class="watch" href="/watch.html">📺 Смотреть трансляцию</a>
+  </nav>
+  <ol>
+    <li>Открой «камеру» на телефоне, разреши доступ к камере и микрофону.</li>
+    <li>Поставь телефон на зарядку — трансляция идёт, пока экран активен.</li>
+    <li>На другом устройстве открой «Смотреть» и нажми кнопку.</li>
+  </ol>
+</body>
+</html>
